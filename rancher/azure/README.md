@@ -4,6 +4,194 @@ Two single-node Kubernetes clusters will be created from two linux virtual insta
 Both instances will have wide-open security groups and will be accessible over SSH using the SSH keys
 `id_rsa` and `id_rsa.pub`.
 
+## Architecture Overview
+
+### Azure Infrastructure Resources
+
+This Terraform deployment creates the following Azure resources:
+
+```mermaid
+graph TB
+    subgraph "Azure Subscription"
+        subgraph "Resource Group: quickstart-rg"
+            subgraph "Virtual Network: 10.0.0.0/16"
+                subnet["Subnet: 10.0.1.0/24"]
+                
+                subgraph "Rancher Server Infrastructure"
+                    rancherVM["Linux VM: rancher-server<br/>Standard_D2s_v5<br/>SLES 15 + K3s"]
+                    rancherNIC["Network Interface"]
+                    rancherPIP["Public IP"]
+                end
+                
+                subgraph "Workload Cluster Infrastructure"
+                    workloadVM["Linux VM: quickstart-node<br/>Standard_D2s_v5<br/>SLES 15 + RKE2"]
+                    workloadNIC["Network Interface"]
+                    workloadPIP["Public IP"]
+                end
+                
+                subgraph "Optional: Windows Node"
+                    windowsVM["Windows VM<br/>(if enabled)"]
+                    windowsNIC["Network Interface"]
+                    windowsPIP["Public IP"]
+                end
+            end
+        end
+    end
+    
+    rancherVM --> rancherNIC
+    rancherNIC --> subnet
+    rancherNIC --> rancherPIP
+    
+    workloadVM --> workloadNIC
+    workloadNIC --> subnet
+    workloadNIC --> workloadPIP
+    
+    windowsVM -.-> windowsNIC
+    windowsNIC -.-> subnet
+    windowsNIC -.-> windowsPIP
+    
+    style rancherVM fill:#326CE5,stroke:#fff,stroke-width:2px,color:#fff
+    style workloadVM fill:#326CE5,stroke:#fff,stroke-width:2px,color:#fff
+    style windowsVM fill:#0078D4,stroke:#fff,stroke-width:2px,color:#fff
+```
+
+### Rancher Multi-Cluster Management Architecture
+
+This diagram shows how Rancher Server can manage downstream clusters including AKS:
+
+```mermaid
+graph TB
+    subgraph "Users & Access"
+        admin["Administrator"]
+        devops["DevOps Team"]
+        dev["Developers"]
+    end
+    
+    subgraph "Rancher Management Server"
+        subgraph "Rancher Server VM (K3s)"
+            rancher["Rancher UI/API<br/>Port 443"]
+            auth["Authentication<br/>(Local/AD/SAML/OIDC)"]
+            rbac["RBAC & Policies"]
+            catalog["Helm Catalog"]
+        end
+    end
+    
+    subgraph "Managed Downstream Clusters"
+        subgraph "Quickstart Workload Cluster"
+            rke2["RKE2 Cluster<br/>(Created by Terraform)"]
+            agent1["Rancher Agent"]
+        end
+        
+        subgraph "Azure Kubernetes Service (AKS)"
+            aks1["AKS Cluster 1<br/>Production"]
+            aksagent1["Rancher Agent"]
+        end
+        
+        subgraph "Additional AKS Clusters"
+            aks2["AKS Cluster 2<br/>Development"]
+            aksagent2["Rancher Agent"]
+            
+            aks3["AKS Cluster 3<br/>Staging"]
+            aksagent3["Rancher Agent"]
+        end
+        
+        subgraph "Other Cloud Providers"
+            eks["Amazon EKS"]
+            gke["Google GKE"]
+            eksagent["Rancher Agent"]
+            gkeagent["Rancher Agent"]
+        end
+    end
+    
+    subgraph "Centralized Management Features"
+        monitoring["Monitoring<br/>(Prometheus/Grafana)"]
+        logging["Logging<br/>(Loki/Elasticsearch)"]
+        backup["Backup & DR"]
+        security["Security Scanning"]
+        gitops["GitOps Integration<br/>(Fleet)"]
+    end
+    
+    admin --> rancher
+    devops --> rancher
+    dev --> rancher
+    
+    rancher --> auth
+    auth --> rbac
+    rancher --> catalog
+    
+    rancher ---|"Manages"| agent1
+    rancher ---|"Manages"| aksagent1
+    rancher ---|"Manages"| aksagent2
+    rancher ---|"Manages"| aksagent3
+    rancher ---|"Manages"| eksagent
+    rancher ---|"Manages"| gkeagent
+    
+    agent1 --> rke2
+    aksagent1 --> aks1
+    aksagent2 --> aks2
+    aksagent3 --> aks3
+    eksagent --> eks
+    gkeagent --> gke
+    
+    rancher --> monitoring
+    rancher --> logging
+    rancher --> backup
+    rancher --> security
+    rancher --> gitops
+    
+    monitoring -.->|"Collects Metrics"| aks1
+    monitoring -.->|"Collects Metrics"| aks2
+    logging -.->|"Aggregates Logs"| aks1
+    gitops -.->|"Deploys Apps"| aks1
+    gitops -.->|"Deploys Apps"| aks2
+    
+    style rancher fill:#0075A8,stroke:#fff,stroke-width:3px,color:#fff
+    style aks1 fill:#0078D4,stroke:#fff,stroke-width:2px,color:#fff
+    style aks2 fill:#0078D4,stroke:#fff,stroke-width:2px,color:#fff
+    style aks3 fill:#0078D4,stroke:#fff,stroke-width:2px,color:#fff
+    style rke2 fill:#326CE5,stroke:#fff,stroke-width:2px,color:#fff
+    style eks fill:#FF9900,stroke:#fff,stroke-width:2px,color:#fff
+    style gke fill:#4285F4,stroke:#fff,stroke-width:2px,color:#fff
+```
+
+## Key Benefits of Rancher Multi-Cluster Management
+
+1. **Unified Control Plane**: Manage all Kubernetes clusters (AKS, EKS, GKE, on-prem) from a single interface
+2. **Centralized Authentication**: Integrate with Active Directory, SAML, OIDC for consistent access control
+3. **Multi-Tenancy**: Project-based isolation and RBAC across clusters
+4. **Application Catalog**: Deploy applications consistently across all clusters using Helm charts
+5. **Monitoring & Logging**: Centralized observability with Prometheus, Grafana, and log aggregation
+6. **GitOps Workflows**: Use Fleet for continuous delivery across multiple clusters
+7. **Security & Compliance**: Policy enforcement, security scanning, and compliance reporting
+8. **Backup & Disaster Recovery**: Automated backup and restore capabilities
+
+## Connecting AKS Clusters to Rancher
+
+After deploying this quickstart, you can import existing AKS clusters:
+
+1. **Create AKS Cluster** (if not exists):
+   ```bash
+   az aks create \
+     --resource-group <rg-name> \
+     --name <aks-cluster-name> \
+     --node-count 3 \
+     --enable-addons monitoring \
+     --generate-ssh-keys
+   ```
+
+2. **Import to Rancher**:
+   - Log into Rancher UI
+   - Click "Cluster Management" → "Import Existing"
+   - Select "Azure AKS"
+   - Choose your Azure subscription
+   - Select the AKS cluster to import
+   - Apply the provided kubectl command to your AKS cluster
+
+3. **Alternative - Register Generic Cluster**:
+   - In Rancher UI: Cluster Management → Import Existing → Generic
+   - Copy the registration command
+   - Run on AKS cluster: `kubectl apply -f <registration-manifest>`
+
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
